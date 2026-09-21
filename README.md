@@ -1,809 +1,467 @@
 # chatgpt-local-agent-mcp 🖥️
 
-Give ChatGPT controlled hands on your Windows PC.
-
-ChatGPT is good at thinking through work, writing code, explaining fixes, and spotting problems. But sooner or later it hits the same wall: the real project is on your computer.
-
-The files are there.  
-The repo is there.  
-The logs are there.  
-The browser session is there.  
-The broken build is there.
-
-**chatgpt-local-agent-mcp** is a local MCP server that lets ChatGPT work against that real local context, under your control.
-
-The simple version:
-
-**ChatGPT stays the brain.  
-This gives it supervised hands on your computer.**
-
-It can inspect folders, read files, apply patches, run commands, check Git status, open browser sessions, look at screenshots, inspect windows, and help operate the desktop when needed.
-
-This is powerful, and it should be treated that way. A full remote setup is intentionally explicit: you are connecting a local Windows environment to a remote ChatGPT connector. Do not expose local capabilities casually.
+**chatgpt-local-agent-mcp** คือ Local MCP Server (Model Context Protocol) ประสิทธิภาพสูงสำหรับระบบปฏิบัติการ Windows ที่ออกแบบมาเพื่อให้ ChatGPT สามารถทำงานกับไฟล์ คำสั่ง ไดเรกทอรี เบราว์เซอร์ หน้าจอ และเดสก์ท็อปในเครื่องจริงของคุณได้อย่างปลอดภัย ภายใต้การควบคุมและกำกับดูแลของผู้ใช้ผ่านการยืนยันตัวตน (Authentication), สิทธิ์การใช้งาน (Scopes), นโยบายการรัน (Policy Modes) และโปรไฟล์พื้นที่ทำงาน (Workspace Profiles)
 
 ---
 
-## Start here: two setup paths ⚡
+## 1. ชื่อโครงการ (Project Name)
 
-There are two different things people often mix together:
+**chatgpt-local-agent-mcp**  
+ทำหน้าที่เป็นสะพานเชื่อมแบบสองทางระหว่าง ChatGPT ( reasoning/agent layer บนคลาวด์) กับเครื่องคอมพิวเตอร์ Windows ของคุณ (local execution context) ทำให้ ChatGPT มี "มือ" ในการอ่านไฟล์ แก้ไขโค้ด รันคำสั่ง ตรวจสอบ Git ควบคุมเบราว์เซอร์ และส่งอินพุตบนเดสก์ท็อปได้อย่างมีขอบเขต
 
-1. proving the local server works;
-2. exposing it to ChatGPT as a remote MCP connector.
+---
 
-Do them in that order.
+## 2. ระบบนี้ทำอะไร (System Workflow)
 
-### Path A — local-only smoke test
-
-Use this first.
-
-This mode is for proving the app starts locally and that the dashboard/health checks work.
-
-It does **not** connect ChatGPT yet.
+ระบบนี้ทำงานเป็นตัวกลางระหว่าง ChatGPT กับเครื่อง Windows โดยมีลำดับขั้นตอนดังนี้:
 
 ```text
-Windows PC
-  -> http://127.0.0.1:8789
-  -> local MCP server
-  -> local dashboard / health checks
+[ ChatGPT (Cloud) ]
+        │
+        ▼ (MCP Connector over Public HTTPS)
+[ HTTPS / Cloudflare Tunnel ] (หรือ Tailscale Funnel)
+        │
+        ▼ (Proxy to localhost)
+[ Local MCP Server (Express / Streamable HTTP) ] ── (127.0.0.1:8789)
+        │
+        ├─► [ OAuth 2.0 / GitHub Authentication Guard ]
+        ├─► [ Workspace Profiles & Secret Path Filtering ]
+        └─► [ Policy Mode & Fine-Grained Scope Validation ]
+        │
+        ▼ (Executed under Windows User Account)
+[ Windows PC (Files / Shell / Git / Processes / Browser / Desktop) ]
 ```
 
-For this first test:
+* **ChatGPT** ทำหน้าที่เป็น **Brain** (ประมวลผล วางแผน คิดวิเคราะห์ และร้องขอการใช้มือ)
+* **chatgpt-local-agent-mcp** ทำหน้าที่เป็น **Supervised Hands** (ตรวจสอบสิทธิ์ ควบคุมความปลอดภัย บันทึก Audit Journal และปฏิบัติตามคำสั่งบนเครื่องจริง)
+
+---
+
+## 3. สถาปัตยกรรมระบบ (Architecture Diagrams)
+
+### 3.1 Local-Only Mode (ทดสอบภายในเครื่อง)
+```text
+[ Windows User / Browser ]
+        │
+        ▼ HTTP
+┌─────────────────────────────────────────────────────────────┐
+│ Local Windows PC (127.0.0.1:8789)                           │
+│                                                             │
+│  ├─► GET /healthz          (Health Check)                   │
+│  ├─► GET /dashboard        (Local Control Web Dashboard)    │
+│  └─► POST /mcp             (Streamable HTTP Transport)      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.2 Remote ChatGPT Connector Mode
+```text
+[ ChatGPT Action / Connector ]
+        │
+        ▼ Public HTTPS Request (e.g. https://mcp.your-domain.com/mcp)
+[ Cloudflare Edge / DNS ]
+        │
+        ▼ Encrypted Cloudflare Tunnel (cloudflared)
+[ Local Windows PC ]
+        │
+        ▼ Forward to Local Port
+┌─────────────────────────────────────────────────────────────┐
+│ Express Server (http://127.0.0.1:8789)                      │
+│  ├── Host Header Validation                                 │
+│  ├── Bearer Token Auth Middleware (src/index.ts)            │
+│  ├── Preflight Policy & Scope Check (rejectToolPreflight)   │
+│  ├── StreamableHTTPServerTransport                          │
+│  └── McpServer Execution & Journal Logging                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.3 OAuth 2.0 Authorization & Token Flow
+```text
+[ ChatGPT ]               [ Local MCP Server ]             [ GitHub OAuth ]
+     │                             │                              │
+     ├─── 1. GET /authorize ──────►│                              │
+     │    (client_id, PKCE)        ├─── 2. Redirect to GitHub ────►│
+     │                             │                              │
+     │                             │◄── 3. User authenticates ─────┤
+     │◄── 4. Redirect with code ───┤◄── 5. Callback (/callback) ────┘
+     │                             │    (Check ALLOWED_LOGINS)
+     ├─── 6. POST /token ─────────►│
+     │    (code_verifier)          │ (Verify PKCE & Issue Token)
+     │◄── 7. Access Token ─────────┤
+```
+
+### 3.4 Cloudflare Tunnel Connectivity Flow
+```text
+[ External Request ] ──► [ Cloudflare Ingress Rule ]
+                              │ (hostname: mcp.your-domain.com)
+                              ▼
+                         [ cloudflared daemon ]
+                              │ (Local HTTP Forward)
+                              ▼
+                         [ 127.0.0.1:8789 ]
+```
+
+---
+
+## 4. เริ่มต้นใช้งาน — Path A: Local-Only Smoke Test
+
+ใช้ Path A เพื่อทดสอบว่าโปรแกรมรันได้สมบูรณ์ในเครื่อง local ก่อนเชื่อมต่อภายนอก
+
+### ข้อกำหนดของระบบ (Requirements)
+* ระบบปฏิบัติการ Windows 10/11
+* Node.js (แนะนำ v18 ขึ้นไป) และ npm
+* PowerShell 5.1 หรือ PowerShell Core
+* Git for Windows
+
+### ขั้นตอนการรัน Local Smoke Test
+1. เปิด PowerShell ในโฟลเดอร์ซอร์สโค้ด แล้วรันสคริปต์ติดตั้ง:
+   ```powershell
+   .\install-chatgpt-local-agent-mcp.bat
+   ```
+2. ตัวติดตั้งจะคัดลอกไฟล์ไปยังไดเรกทอรีทำงานจริง (Runtime Install Root):
+   ```text
+   %LOCALAPPDATA%\chatgpt-local-agent-mcp
+   ```
+3. กำหนดค่าคอนฟิกสำหรับทดสอบ Local-only ในไฟล์ `.env` ของโฟลเดอร์ runtime:
+   ```env
+   PUBLIC_BASE_URL=http://127.0.0.1:8789
+   CLOUDFLARE_TUNNEL_ENABLED=false
+   AUTH_REQUIRED=false
+   NODE_ENV=development
+   ```
+4. เริ่มรันเซิร์ฟเวอร์ และเปิดดู Endpoints ในเครื่อง:
+   * **Web Dashboard:** `http://127.0.0.1:8789/dashboard`
+   * **Health Check:** `http://127.0.0.1:8789/healthz`
+   * **MCP Endpoint:** `http://127.0.0.1:8789/mcp`
+
+---
+
+## 5. การเชื่อมต่อ Remote ChatGPT Connector — Path B
+
+ทำขั้นตอนนี้เมื่อ Path A ทำงานผ่านแล้วเท่านั้น
 
 ```text
-No Cloudflare.
-No public URL.
-No GitHub OAuth App.
-No ChatGPT connector OAuth.
-No remote connector yet.
+ChatGPT (Remote) ──► Public HTTPS Domain ──► Cloudflare Tunnel ──► http://127.0.0.1:8789 ──► Local MCP Server
 ```
 
-Start with the installer and run the local dashboard first:
+### สิ่งที่ต้องเตรียมเพิ่มเติม:
+* ชื่อโดเมนสาธารณะ (Public HTTPS Hostname)
+* Cloudflare Tunnel (หรือ HTTPS Tunnel อื่นๆ เช่น Tailscale Funnel)
+* GitHub OAuth App (สำหรับระบุตัวตนผู้ใช้)
+* ChatGPT Connector OAuth Client Configuration ใน `.env`
+* รายชื่อ GitHub Logins ที่อนุญาต (`ALLOWED_GITHUB_LOGINS`)
 
-```powershell
-.\install-chatgpt-local-agent-mcp.bat
-```
+---
 
-Then follow [INSTALL.md](INSTALL.md), Path A.
+## 6. โครงสร้าง OAuth 2.0 (OAuth Architecture)
 
-### Path B — full remote ChatGPT connector
-
-Use this only after Path A works.
-
-This is the real remote connector setup:
+ระบบนี้ใช้ OAuth 2.0 สองชั้น (Two OAuth Layers) เพื่อความปลอดภัยสูงสุด:
 
 ```text
-ChatGPT
-  -> your HTTPS hostname
-  -> Cloudflare Tunnel or another HTTPS tunnel
-  -> http://127.0.0.1:8789
-  -> local MCP server
-  -> your Windows PC
+┌────────────────────────────────────────────────────────────────────────┐
+│ Layer 1: User Authentication (GitHub OAuth App -> MCP Server)          │
+│ - GITHUB_CLIENT_ID: ID ของ GitHub OAuth App                            │
+│ - GITHUB_CLIENT_SECRET: Secret ของ GitHub OAuth App                    │
+│ - ALLOWED_GITHUB_LOGINS: รายชื่อ GitHub User ที่มีสิทธิ์ใช้งาน             │
+│ - Callback URL: https://<PUBLIC_BASE_URL>/callback                     │
+└────────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Layer 2: Client Connection (ChatGPT Client -> MCP Server)              │
+│ - OAUTH_CLIENT_ID: ID สำหรับ ChatGPT ยิงเข้ามาต่อ                     │
+│ - OAUTH_CLIENT_SECRET: Secret สำหรับ ChatGPT                           │
+│ - OAUTH_REDIRECT_URIS: Callback URL ของ ChatGPT Connector             │
+│   (เช่น https://chatgpt.com/connector/oauth/xxxx)                     │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-This path needs OAuth, an allowlist, a public HTTPS MCP URL, and deliberate security choices.
-
-That extra friction is intentional. This project can expose local machine capabilities through a remote connector, so the remote path should stay explicit, supervised, and a bit boring on purpose.
+### Endpoints ตามมาตรฐาน RFC 9728 & OAuth 2.0
+* `GET /.well-known/oauth-protected-resource`: คืนค่า Metadata ของ Protected Resource
+* `GET /.well-known/oauth-authorization-server`: คืนค่า Metadata ของ Authorization Server
+* `GET /authorize`: จุดรับ Authorization request (รองรับ PKCE `S256`)
+* `GET /callback`: จุดรับ Callback จาก GitHub เพื่อตรวจสอบ `ALLOWED_GITHUB_LOGINS`
+* `POST /token`: จุดออก Access Token เมื่อส่ง `code_verifier` ถูกต้อง
 
 ---
 
-## Why this exists 🚀
+## 7. การตั้งค่า Cloudflare Tunnel
 
-Most AI coding workflows still have a gap.
+สถาปัตยกรรมนี้ใช้ **Cloudflare Tunnel (cloudflared)** ในการส่งต่อ Traffic ไม่ใช่ Cloudflare Workers
 
-ChatGPT can tell you what command to run.  
-This lets ChatGPT help run the command.
-
-ChatGPT can suggest a patch.  
-This lets ChatGPT apply the patch.
-
-ChatGPT can ask for a log.  
-This lets ChatGPT inspect the log.
-
-ChatGPT can guess from snippets.  
-This lets ChatGPT read the actual files.
-
-That changes the workflow.
-
-Instead of copying errors, files, diffs, screenshots, and terminal output back and forth, you can let ChatGPT work through local MCP tools and keep the loop close to the real machine.
-
-You still supervise it.  
-You still choose the workspace.  
-You still control the endpoint.  
-But ChatGPT is no longer blind to the place where the work actually lives.
-
----
-
-## What it can help with 🧰
-
-With the server running, ChatGPT can help with things like:
-
-* inspect a local project
-* read files and folders
-* search a workspace
-* compare files
-* apply patches
-* write or update files
-* run build or diagnostic commands
-* inspect Git status and diffs
-* create local Git commits
-* list processes and ports
-* tail logs
-* open browser automation sessions
-* inspect browser pages
-* check console and network output
-* look at screenshots
-* inspect windows
-* use desktop mouse and keyboard actions when needed
-* show local status through a dashboard
-
-The goal is not to make ChatGPT “autonomous”.
-
-The goal is to let ChatGPT work with the same local reality you are working with.
-
----
-
-## Quick install overview 🧭
-
-### Requirements for Path A — local-only smoke test
-
-* Windows
-* Node.js and npm
-* PowerShell or Windows PowerShell
-* Git recommended
-
-### Additional requirements for Path B — full remote connector
-
-* Cloudflare Tunnel or another HTTPS tunnel
-* GitHub OAuth App
-* ChatGPT connector OAuth values
-* a public HTTPS MCP endpoint
-
-From the extracted source folder, run:
-
-```powershell
-.\install-chatgpt-local-agent-mcp.bat
-```
-
-The extracted source folder is only the source package. The installer copies the app into the runtime install folder and builds there.
-
-Default runtime install folder:
-
-```text
-%LOCALAPPDATA%\chatgpt-local-agent-mcp
-```
-
-Your private `.env`, logs, data, dependencies, build output, browser artifacts, journals, backups, and screenshots belong in the install folder, not in the extracted source folder.
-
-For the exact first-run steps, use [INSTALL.md](INSTALL.md).
-
----
-
-## Local control 🕹️
-
-The project includes local control surfaces so you can see what is happening before connecting anything remotely.
-
-Useful local URLs and tools:
-
-* web dashboard:
-
-  ```text
-  http://127.0.0.1:8789/dashboard
-  ```
-
-* health endpoint:
-
-  ```text
-  http://127.0.0.1:8789/healthz
-  ```
-
-* fallback PowerShell dashboard
-* control menu batch file
-* live monitor script
-
-Use these before trusting the remote connector.
-
-The dashboard exists for a reason: when an AI has tools near your machine, visibility matters.
-
----
-
-## Start carefully ⚠️
-
-This project is intentionally capable.
-
-The default workspace profile is full-machine: on Windows, the server creates profiles for detected drive roots such as `C:\` and `D:\` when no custom workspace profile is configured.
-
-If you want the first serious test limited to one folder or repo, configure a custom workspace profile before connecting ChatGPT.
-
-Recommended progression:
-
-1. Run Path A locally first.
-2. Keep the server bound to `127.0.0.1` while testing.
-3. Use one test folder or repo before expanding access.
-4. Use a dedicated browser profile if possible.
-5. Keep shell and process access guarded until you understand the tool surface.
-6. Watch the local dashboard while testing.
-7. Only then configure the remote ChatGPT connector.
-
-Treat access like you would treat a human assistant sitting at your keyboard.
-
----
-
-## Connecting ChatGPT 🔌
-
-The ChatGPT connector URL is the MCP endpoint:
-
-```text
-https://your-public-host.example/mcp
-```
-
-For ChatGPT to reach your local server, the endpoint must be available over HTTPS.
-
-A typical setup uses Cloudflare Tunnel to forward your public hostname to:
-
-```text
-http://127.0.0.1:8789
-```
-
-There are two OAuth relationships. Keep them separate.
-
-### 1. You sign in with GitHub
-
-GitHub is used as the identity provider.
-
-The GitHub OAuth App callback should be:
-
-```text
-https://your-public-host.example/callback
-```
-
-After GitHub login, the server checks the allowlist before issuing local MCP authorization.
-
-### 2. ChatGPT connects as the MCP client
-
-ChatGPT uses the local MCP OAuth configuration from `.env`:
-
-```env
-OAUTH_CLIENT_ID=
-OAUTH_CLIENT_SECRET=
-OAUTH_REDIRECT_URIS=
-```
-
-These are not GitHub credentials.
-
-If the ChatGPT connector is deleted and recreated, ChatGPT may give you a new redirect URI. Update `OAUTH_REDIRECT_URIS` if that happens.
-
----
-
-## Cloudflare Tunnel basics 🌐
-
-For ChatGPT to connect from outside your PC, the public hostname must reach your local server.
-
-The recommended Cloudflare setup is a Tunnel, not a Worker.
-
-In Cloudflare DNS, create a tunnel-backed record for your MCP hostname:
-
-```text
-mcp.your-domain.example -> Cloudflare Tunnel
-```
-
-In the tunnel routes, publish that hostname to the local server:
-
-```text
-https://mcp.your-domain.example -> http://127.0.0.1:8789
-```
-
-The server `.env` should then use the same public base URL:
-
-```env
-PUBLIC_BASE_URL=https://mcp.your-domain.example
-CLOUDFLARE_TUNNEL_ENABLED=true
-CLOUDFLARED_CONFIG=C:\Users\you\.cloudflared\config.yml
-```
-
-If the tunnel is configured but `cloudflared` is not running, Cloudflare may show the tunnel as down and the public hostname may return an error such as `530`. Start the local server and the tunnel connector before connecting ChatGPT.
-
----
-
-## Known ChatGPT limits 🚧
-
-This server can expose local tools to ChatGPT, but ChatGPT still has its own safety layer between your request and any connected tool.
-
-Some actions may ask for confirmation or be blocked entirely: changing or deleting things, sending or posting content, using logged-in websites, exposing sensitive data, following suspicious page instructions, or anything that looks like policy evasion or unsafe automation.
-
-Those blocks happen on the ChatGPT/OpenAI side. Making the MCP server more powerful does not bypass them.
-
----
-
-## 🤖 AI-assisted development
-
-This project was developed with AI assistance.
-
-The project, code, documentation, and repository materials were shaped through human-directed work supported by AI tools during drafting, implementation, review, testing, and refinement.
-
-AI assistance does not make the project automatically correct, complete, secure, or suitable for every use case. Read it, test it, and adapt it to your own context before exposing local files, shell access, browser sessions, or desktop automation.
-
----
-
-<details>
-<summary>Maintainer and technical details 🧑‍🔧</summary>
-
-## Project status 🧭
-
-This is a personal, full-power local MCP system for Windows.
-
-It is usable, but it is DIY. It is not an OS sandbox and it is not a hosted service.
-
-The server runs with the permissions of the Windows account that starts it. If that account can read a file, launch a command, see a browser session, or interact with the desktop, the exposed tools may be able to reach the same surface.
-
-Keep that model in mind while configuring workspaces, browser profiles, scopes, and tunnels.
-
----
-
-## Architecture 🏗️
-
-Core pieces:
-
-* Streamable HTTP MCP server
-* Express HTTP server
-* GitHub OAuth identity flow
-* local MCP authorization code and access token flow
-* scoped MCP tools
-* operation journal
-* local web dashboard
-* PowerShell installer
-* fallback PowerShell dashboard
-* optional Cloudflare Tunnel exposure
-
-Runtime defaults:
-
-```text
-Server:     http://127.0.0.1:8789
-MCP:        http://127.0.0.1:8789/mcp
-Dashboard: http://127.0.0.1:8789/dashboard
-```
-
-Normal install root:
-
-```text
-%LOCALAPPDATA%\chatgpt-local-agent-mcp
-```
-
----
-
-## Tool surface 🧰
-
-The server registers tools across these categories:
-
-* workspace information
-* filesystem read, write, patch, copy, move, delete, search, hash, tree, stat
-* Git status, diff, commit
-* process start, stop, kill, port list, log tail, wait for port
-* shell execution
-* browser sessions, navigation, snapshots, console, network, screenshots, CDP attach
-* screen, OCR hook, and window listing
-* desktop mouse and keyboard automation
-
-Tool access is controlled by MCP scopes:
-
-```text
-mcp:read
-mcp:write
-mcp:shell
-mcp:git
-mcp:patch
-mcp:delete
-mcp:process
-mcp:screen
-mcp:desktop
-mcp:browser
-```
-
-Use narrow scopes when possible. Add power only when you need it.
-
----
-
-## Configuration ⚙️
-
-Create a private `.env` from `.env.example`.
-
-Full-power local defaults from `.env.example`:
-
-```env
-GPT_FS_MCP_HOST=127.0.0.1
-GPT_FS_MCP_PORT=8789
-GPT_FS_MCP_MAX_POLICY_MODE=destructive
-GPT_FS_MCP_ENFORCE_WORKSPACE_PROFILES=true
-GPT_FS_MCP_SHELL_POLICY=full
-GPT_FS_MCP_PROCESS_POLICY=full
-AUTH_REQUIRED=true
-NODE_ENV=development
-```
-
-For local-only smoke testing before OAuth is configured, `AUTH_REQUIRED=false` is allowed only while the server is bound to localhost and no tunnel is enabled.
-
-Safe local-only smoke test values:
-
-```env
-PUBLIC_BASE_URL=http://127.0.0.1:8789
-CLOUDFLARE_TUNNEL_ENABLED=false
-AUTH_REQUIRED=false
-```
-
-Never use `AUTH_REQUIRED=false` with a public URL, public hostname, or tunnel. The installer/server guard against unsafe combinations, but configuration still matters.
-
-For a safer first workspace, define `GPT_FS_MCP_WORKSPACE_PROFILES_JSON` for one test folder, keep auth enabled for remote use, and guard command execution:
-
-```env
-GPT_FS_MCP_SHELL_POLICY=workspace_guarded
-GPT_FS_MCP_PROCESS_POLICY=workspace_guarded
-```
-
-Use `full` command policies only when you deliberately want shell and process tools to reach outside declared workspace paths.
-
-For a public or tunneled connector:
-
-```env
-AUTH_REQUIRED=true
-CLOUDFLARE_TUNNEL_ENABLED=true
-PUBLIC_BASE_URL=https://your-public-host.example
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-ALLOWED_GITHUB_LOGINS=your-github-login
-OAUTH_CLIENT_ID=
-OAUTH_CLIENT_SECRET=
-OAUTH_REDIRECT_URIS=
-```
-
-Treat `.env` as security-critical.
-
----
-
-## OAuth model 🔐
-
-There are two OAuth layers.
-
-### GitHub OAuth App → MCP server
-
-You sign in with GitHub.
-
-The server redirects to GitHub, receives the callback, checks the allowed GitHub login, and then issues a local MCP authorization code.
-
-GitHub callback:
-
-```text
-https://your-public-host.example/callback
-```
-
-Relevant config:
-
-```env
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-ALLOWED_GITHUB_LOGINS=
-```
-
-### ChatGPT connector → MCP server
-
-ChatGPT is the OAuth client talking to this MCP server.
-
-Relevant config:
-
-```env
-OAUTH_CLIENT_ID=
-OAUTH_CLIENT_SECRET=
-OAUTH_REDIRECT_URIS=
-```
-
-The server exposes OAuth metadata at:
-
-```text
-/.well-known/oauth-protected-resource
-/.well-known/oauth-authorization-server
-```
-
-The server does not expose dynamic client registration.
-
----
-
-## Cloudflare Tunnel model 🌐
-
-The intended remote exposure model is:
-
-```text
-ChatGPT
-  -> https://mcp.your-domain.example/mcp
-  -> Cloudflare Tunnel
-  -> http://127.0.0.1:8789
-  -> local MCP server
-```
-
-No Cloudflare Worker is required for the normal setup.
-
-For a locally managed Cloudflare Tunnel, the dashboard route is read from the local `cloudflared` configuration file. A minimal route looks like:
-
+### โครงสร้างไฟล์คอนฟิก `cloudflared` (config.yml)
 ```yaml
 ingress:
-  - hostname: mcp.your-domain.example
+  - hostname: mcp.your-domain.com
     service: http://127.0.0.1:8789
   - service: http_status:404
 ```
 
-The matching `.env` values are:
-
+### การตั้งค่าใน `.env`
 ```env
-PUBLIC_BASE_URL=https://mcp.your-domain.example
+PUBLIC_BASE_URL=https://mcp.your-domain.com
 CLOUDFLARE_TUNNEL_ENABLED=true
-CLOUDFLARED_CONFIG=C:\Users\you\.cloudflared\config.yml
+CLOUDFLARED_CONFIG=C:\Users\Administrator\.cloudflared\config.yml
 ```
-
-If Cloudflare shows the DNS record as a Tunnel but the tunnel status is `Down` with `0` active replicas, the dashboard configuration can still be correct. It means the local `cloudflared` connector is not currently connected.
 
 ---
 
-## Security boundaries 🧱
+## 8. รายการ MCP Tools ทั้งหมด (54 Tools)
 
-This system is designed to be capable, not sandboxed.
+เซิร์ฟเวอร์เปิดใช้งานเครื่องมือ 54 ตัว ซึ่งแบ่งตามหมวดหมู่ใน `src/tools/registry.ts`:
 
-Boundaries it does provide:
+### 8.1 Workspace & Filesystem Tools (18 Tools)
+* `workspace_info`: ดูข้อมูลโครงสร้างพื้นที่ทำงานและโปรไฟล์ที่ตั้งค่าไว้
+* `stat`: ตรวจสอบสถานะไฟล์/ไดเรกทอรี
+* `stat_many`: ตรวจสอบสถานะไฟล์หลายรายการพร้อมกัน
+* `list_dir`: แสดงรายการไฟล์ในไดเรกทอรี
+* `tree`: แสดงโครงสร้างต้นไม้ของไดเรกทอรี
+* `search`: ค้นหาเนื้อหาภายในไฟล์ด้วย Regex Pattern
+* `read_file`: อ่านเนื้อหาในไฟล์
+* `read_file_range`: อ่านเนื้อหาในไฟล์เฉพาะบรรทัดที่กำหนด
+* `read_many`: อ่านไฟล์หลายรายการพร้อมกัน
+* `hash`: คำนวณค่า Hash (SHA-256) ของไฟล์
+* `write_file`: เขียนหรือสร้างไฟล์ใหม่
+* `apply_patch`: รวมการแก้ไขแบบ Patch (Diff) เข้ากับไฟล์
+* `mkdir`: สร้างไดเรกทอรีใหม่
+* `copy`: คัดลอกไฟล์/ไดเรกทอรี
+* `move`: ย้ายหรือเปลี่ยนชื่อไฟล์/ไดเรกทอรี
+* `delete`: ลบไฟล์/ไดเรกทอรี
+* `rollback_backup`: ย้อนคืนการแก้ไขไฟล์จาก Backup Snapshot
 
-* OAuth controls who can connect.
-* GitHub login allowlisting controls who can complete auth.
-* MCP scopes control tool categories.
-* policy modes limit which tools are available.
-* workspace profiles can restrict filesystem paths.
-* command policies can restrict shell/process behavior.
-* journals and logs redact common secret-looking fields.
+### 8.2 Git Tools (3 Tools)
+* `git_status`: ตรวจสอบสถานะ Working Tree ของ Git
+* `git_diff`: แสดงความเปลี่ยนแปลง (Diff) ของไฟล์ใน Git
+* `git_commit`: สร้าง Git Commit ในเครื่อง local
 
-Boundaries it does not provide:
+### 8.3 Process Tools (7 Tools)
+* `process_list`: แสดงรายการ Process ที่กำลังรันในระบบ
+* `port_list`: แสดงรายการ TCP Listening Ports
+* `wait_for_port`: รอจนกว่า Port ที่ระบุจะเปิดใช้งาน
+* `tail_log`: อ่านส่วนท้ายของไฟล์ Log
+* `start_process`: เริ่มต้นรัน Process ใหม่ใน Background
+* `stop_process`: หยุดการทำงานของ Process
+* `process_kill`: บังคับปิด Process ด้วย PID
 
-* It is not an OS sandbox.
-* Browser CDP attach can interact with existing browser profiles and logged-in sessions.
-* Desktop tools can move the mouse and press keys.
-* Shell and process tools run with the local server process permissions.
-* An authorized assistant may still read or reveal accessible local secrets if you expose them through files, browser state, desktop, or shell.
+### 8.4 Shell Tool (1 Tool)
+* `shell`: รันคำสั่ง Shell (git-bash/MSYS) บนเครื่อง Windows
 
-For stricter command behavior:
+### 8.5 Screen Tools (3 Tools)
+* `window_list`: แสดงรายการหน้าต่างโปรแกรมที่เปิดอยู่บน Desktop
+* `screen_screenshot`: ถ่ายภาพหน้าจอ (Screenshot)
+* `screen_ocr`: สกัดข้อความจากภาพหน้าจอด้วย OCR
 
-```env
-GPT_FS_MCP_SHELL_POLICY=workspace_guarded
-GPT_FS_MCP_PROCESS_POLICY=workspace_guarded
-```
+### 8.6 Desktop Automation Tools (6 Tools)
+* `desktop_mouse_position`: อ่านตำแหน่งปัจจุบันของเมาส์
+* `desktop_mouse_move`: ขยับพิกัดเมาส์
+* `desktop_mouse_click`: คลิกเมาส์ (ซ้าย/ขวา/กลาง/ดับเบิลคลิก)
+* `desktop_key_press`: กดปุ่มคีย์บอร์ด
+* `desktop_hotkey`: กดปุ่มคีย์บอร์ดแบบผสม (Hotkey เช่น Ctrl+C)
+* `desktop_text_type`: พิมพ์ข้อความลงคีย์บอร์ด
 
-`workspace_guarded` checks the command working directory plus explicit path references and expected touched paths.
-
-It is still not a sandbox.
+### 8.7 Browser Automation Tools (16 Tools)
+* `browser_session_create`: สร้างเบราว์เซอร์เซสชันใหม่ (Playwright)
+* `browser_session_list`: แสดงรายการเซสชันเบราว์เซอร์ที่เปิดอยู่
+* `browser_session_close`: ปิดเบราว์เซอร์เซสชัน
+* `browser_cdp_connect`: เชื่อมต่อเบราว์เซอร์ผ่าน Chrome DevTools Protocol (CDP)
+* `browser_page_list`: แสดงรายการแท็บหน้าเว็บ
+* `browser_page_select`: สลับแท็บหน้าเว็บที่เปิดอยู่
+* `browser_navigate`: เปิด URL ในเบราว์เซอร์
+* `browser_snapshot`: ดึง DOM Tree / เนื้อหาของหน้าเว็บ
+* `browser_console`: อ่าน Console Logs ของเบราว์เซอร์
+* `browser_network`: อ่าน Network Requests/Responses
+* `browser_wait`: รอองค์ประกอบหน้าเว็บตาม Selector
+* `browser_click`: คลิกองค์ประกอบบนหน้าเว็บ
+* `browser_fill`: กรอกข้อมูลในฟอร์มหน้าเว็บ
+* `browser_type`: พิมพ์ข้อความบนหน้าเว็บ
+* `browser_press_key`: กดปุ่มบนหน้าเว็บ
+* `browser_screenshot`: ถ่ายภาพหน้าเว็บในเบราว์เซอร์
 
 ---
 
-## Workspace profiles 📁
+## 9. สิทธิ์การใช้งาน (MCP Scopes)
 
-By default, when `GPT_FS_MCP_WORKSPACE_PROFILES_JSON` is empty, the server creates one workspace profile per detected filesystem root.
+ระบบจำกัดการเข้าถึงเครื่องมือตาม Scope 10 กลุ่มใน `src/scopes.ts`:
 
-On Windows, that means available drive roots such as:
-
-```text
-C:\
-D:\
-```
-
-That is intentional full-machine access.
-
-`GPT_FS_MCP_DEFAULT_CWD` only controls the starting directory for relative paths and commands. If it is empty, it falls back to the user `Documents\GitHub` folder. It does not limit filesystem access by itself.
-
-Custom workspace profiles can be provided with:
-
-```env
-GPT_FS_MCP_WORKSPACE_PROFILES_JSON=
-```
-
-Profiles define:
-
-* root path
-* allowed policy modes
-* backup policy
-* secret deny globs
-
-Use profiles to keep the assistant inside the intended workspace instead of exposing more of the machine than necessary.
+| Scope | คำอธิบาย | หมวดเครื่องมือที่ครอบคลุม |
+| :--- | :--- | :--- |
+| `mcp:read` | อ่านข้อมูลและสำรวจระบบ | Workspace, Read File, Tree, Stat, Search, Hash |
+| `mcp:write` | เขียน เปลี่ยนแปลง หรือลบไฟล์ | Write File, Copy, Mkdir, Move, Rollback Backup |
+| `mcp:patch` | ประยุกต์ใช้ไฟล์ Patch | Apply Patch |
+| `mcp:delete` | ลบไฟล์และไดเรกทอรี | Delete File |
+| `mcp:git` | ตรวจสอบและบันทึก Git | Git Status, Git Diff, Git Commit |
+| `mcp:process` | จัดการ Process และ Port | Process List, Start/Stop Process, Port List |
+| `mcp:shell` | Exec คำสั่ง Shell | Shell Execution |
+| `mcp:screen` | อ่านหน้าจอและ OCR | Window List, Screenshot, Screen OCR |
+| `mcp:desktop` | ควบคุม เมาส์/คีย์บอร์ด | Mouse Move/Click, Key Press, Hotkey, Text Type |
+| `mcp:browser` | ควบคุมและทดสอบเบราว์เซอร์ | Browser Automation & CDP Attachment |
 
 ---
 
-## Browser, screen, and desktop notes 🌐
+## 10. ระบบความปลอดภัย (Security Model)
 
-Browser automation uses Playwright.
+> [!WARNING]
+> **ระบบนี้ไม่ใช่ OS Sandbox!**  
+> เซิร์ฟเวอร์ทำงานด้วยสิทธิ์ของ Windows Account ที่เปิดรันเซิร์ฟเวอร์ หาก Account นั้นสามารถอ่านไฟล์ รันคำสั่ง หรือควบคุมเบราว์เซอร์ใดได้ เครื่องมือที่เปิดให้อาจสามารถเข้าถึงทรัพยากรเหล่านั้นได้เช่นกัน
 
-If browser binaries are missing after dependency install, run:
+### มาตรการป้องกันหลายชั้น (Multi-Layer Security)
+1. **Host Header Validation:** ป้องกัน DNS Rebinding Attacks
+2. **GitHub OAuth Allowlist:** อนุญาตเฉพาะ User ที่มีรายชื่อใน `ALLOWED_GITHUB_LOGINS`
+3. **PKCE S256 Enforcement:** บังคับใช้ PKCE สำหรับการแลกเปลี่ยน OAuth Token
+4. **Workspace Profile Constraints:** จำกัดการทำงานของไฟล์ให้อยู่เฉพาะไดเรกทอรีที่กำหนด
+5. **Secret Deny Globs:** บล็อกการอ่าน/เขียนไฟล์ความลับโดยอัตโนมัติ (เช่น `**/.env`, `**/*secret*`, `**/*token*`, `**/*credential*`)
+6. **Command Policy Guards:** กรองการรันคำสั่ง Shell (`workspace_guarded` / `disabled` / `full`)
+7. **Audit Journal & Backups:** บันทึกการทำงานทุกครั้งลง `data/journal.jsonl` และสำรองไฟล์ก่อนลบ/แก้ไข
+
+---
+
+## 11. โปรไฟล์พื้นที่ทำงาน (Workspace Profiles)
+
+หากไม่ได้ระบุ `GPT_FS_MCP_WORKSPACE_PROFILES_JSON` ระบบจะสร้างโปรไฟล์เริ่มต้นครอบคลุม Root Drives ที่พบในเครื่อง เช่น `C:\` และ `D:\`
+
+### ตัวอย่างการกำหนด Workspace Profile จำกัดเฉพาะโฟลเดอร์
+```json
+[
+  {
+    "name": "my-project",
+    "label": "My Test Project",
+    "rootPath": "D:\\projects\\my-project",
+    "allowedPolicyModes": ["observe", "diagnose", "edit"],
+    "backupPolicy": "snapshot",
+    "secretDenyGlobs": ["**/.env", "**/*secret*", "**/*token*"]
+  }
+]
+```
+
+---
+
+## 12. ตารางตัวแปรสภาพแวดล้อม (Configuration Variables)
+
+| Variable | หน้าที่ | ตัวอย่าง / ค่าเริ่มต้น | ความปลอดภัย |
+| :--- | :--- | :--- | :--- |
+| `GPT_FS_MCP_HOST` | IP ที่ใช้ Bind เซิร์ฟเวอร์ | `127.0.0.1` | Local Only |
+| `GPT_FS_MCP_PORT` | Port ที่เปิดรับ Connection | `8789` | Standard Port |
+| `PUBLIC_BASE_URL` | URL สาธารณะของเซิร์ฟเวอร์ | `https://mcp.your-domain.com` | Match DNS |
+| `AUTH_REQUIRED` | บังคับใช้ OAuth Authentication | `true` | Critical |
+| `AUTH_REQUIRE_PKCE` | บังคับใช้ PKCE S256 | `true` | High |
+| `CLOUDFLARE_TUNNEL_ENABLED` | เปิดใช้งาน Cloudflare Tunnel integration | `true` / `false` | Network |
+| `GITHUB_CLIENT_ID` | Client ID ของ GitHub OAuth App | `Ov23li...` | OAuth Identity |
+| `GITHUB_CLIENT_SECRET` | Client Secret ของ GitHub OAuth App | `***` | **Secret (Do Not Share)** |
+| `ALLOWED_GITHUB_LOGINS` | รายชื่อ GitHub Logins ที่อนุญาต | `tanma2008` | Access Control |
+| `OAUTH_CLIENT_ID` | Client ID สำหรับ ChatGPT Connector | `4b5f9d3a-...` | Client Auth |
+| `OAUTH_CLIENT_SECRET` | Client Secret สำหรับ ChatGPT Connector | `***` | **Secret (Do Not Share)** |
+| `OAUTH_REDIRECT_URIS` | Callback URL ของ ChatGPT Connector | `https://chatgpt.com/connector/oauth/...` | OAuth Redirect |
+| `GPT_FS_MCP_MAX_POLICY_MODE` | นโยบายความปลอดภัยสูงสุด | `destructive` / `operate` / `edit` | Security Ceiling |
+| `GPT_FS_MCP_SHELL_POLICY` | นโยบายการรันคำสั่ง Shell | `workspace_guarded` / `full` / `disabled` | Command Access |
+| `GPT_FS_MCP_PROCESS_POLICY` | นโยบายการจัดการ Process | `workspace_guarded` / `full` / `disabled` | Process Access |
+
+---
+
+## 13. การติดตั้งและโครงสร้างไดเรกทอรี (Installation Details)
+
+### ความแตกต่างระหว่าง โฟลเดอร์ซอร์สโค้ด กับ ไดเรกทอรีทำงานจริง
+* **Extracted Source Folder:** โฟลเดอร์ซอร์สโค้ดที่ดาวน์โหลดหรือดึงมาจาก Repository
+* **Runtime Install Folder (`%LOCALAPPDATA%\chatgpt-local-agent-mcp`):** โฟลเดอร์ที่สคริปต์ติดตั้งจะคัดลอกไฟล์ไปคอมไพล์ รันเซิร์ฟเวอร์ และเก็บข้อมูลจริง
+
+### สิ่งที่ไม่ควร Commit หรือนำส่งออกสู่อภิปรายสาธารณะ:
+* `.env` และ `.env.local`
+* `data/` (ไฟล์ `journal.jsonl` และ `backups/`)
+* `node_modules/` และ `dist/`
+* ไฟล์ `*.log`
+* ภาพถ่ายหน้าจอ (Screenshots) และ Artifacts จากเบราว์เซอร์
+
+---
+
+## 14. คำสั่งสำหรับนักพัฒนา (Development Commands)
+
+คำสั่งที่รองรับใน `package.json`:
 
 ```powershell
-npx playwright install
-```
-
-Browser and desktop tools are high-risk because they can interact with visible UI and active sessions.
-
-Use a dedicated browser profile when possible.
-
-Do not attach the server to accounts, profiles, or desktop sessions you are not willing to expose to the connected assistant.
-
----
-
-## Development 🧪
-
-Install dependencies:
-
-```powershell
+# ติดตั้ง Dependencies
 npm ci
-```
 
-Type-check:
-
-```powershell
+# ตรวจสอบ Type ด้วย TypeScript
 npm run type-check
-```
 
-Build:
-
-```powershell
+# คอมไพล์ TypeScript ไปยัง dist/
 npm run build
-```
 
-Run tests:
-
-```powershell
+# รัน Automated Unit Tests
 npm test
-```
 
-Run the built server:
-
-```powershell
+# เริ่มต้นรัน MCP Server จาก dist/index.js
 npm start
-```
 
-Run in watch mode:
-
-```powershell
+# รันในพัฒนา mode (Watch Mode ด้วย tsx)
 npm run dev
-```
 
----
-
-## Publish-safe check 🧼
-
-Before sharing the source folder:
-
-```powershell
+# Audit ตรวจสอบความปลอดภัยก่อน Publish / Share โฟลเดอร์
 npm run audit:publish-safe
 ```
 
-The source repo should not include:
+---
 
-* `.env`
-* `data/`
-* `node_modules/`
-* `dist/`
-* `*.log`
-* runtime screenshots
-* browser artifacts
-* journals
-* backups
+## 15. การแก้ไขปัญหาที่พบบ่อย (Troubleshooting)
 
-The included `.gitignore` excludes the main repo-root runtime directories and logs. Run the publish-safe audit before publishing; it is the final check, not the ignore file alone.
+### 15.1 ตอบกลับ `{"error":"invalid_request","error_description":"Authorization request is invalid"}` เมื่อยิง `/authorize`
+* **สาเหตุ:** `resource` parameter ที่ ChatGPT ส่งเข้ามาไม่ตรงกับ `config.resourceUri` (ซึ่งสร้างจาก `PUBLIC_BASE_URL` ใน `.env`) หรือ `OAUTH_REDIRECT_URIS` ใน `.env` ไม่ตรงกับที่ ChatGPT ส่งมา หรือยังไม่ได้ Restart MCP service หลังอัปเดต `.env`
+* **แก้ไข:** ตรวจสอบว่า `PUBLIC_BASE_URL` ใน `.env` ตรงกับ Domain ที่ใช้งานจริง แล้วทำการ Restart MCP Service
+
+### 15.2 `/mcp` ตอบกลับ HTTP `401 Unauthorized`
+* **สาเหตุ:** ยิง Request ไปยังจุดส่งสัญญาณ MCP โดยไม่ได้แนบ `Authorization: Bearer <TOKEN>` หรือ Token หมดอายุ
+* **แก้ไข:** ทำ OAuth Authorization Flow ผ่าน ChatGPT ให้เสร็จสมบูรณ์ก่อน
+
+### 15.3 Cloudflare ตอบกลับ HTTP `530` Error
+* **สาเหตุ:** Cloudflare DNS และ Ingress Rule ชี้ไปยัง Tunnel แต่โปรแกรม `cloudflared` บนเครื่อง Local ไม่ได้รันอยู่ หรือ MCP Server บน Port 8789 ปิดอยู่
+* **แก้ไข:** ตรวจสอบว่า Local MCP Server บน Port 8789 ทำงานอยู่ และสั่งรัน `cloudflared tunnel run`
+
+### 15.4 เบราว์เซอร์อัตโนมัติทำงานไม่ได้
+* **สาเหตุ:** ยังไม่ได้ติดตั้ง Playwright Browser Binaries
+* **แก้ไข:** รันคำสั่ง `npx playwright install` ในโฟลเดอร์ runtime
 
 ---
 
-## Troubleshooting 🩺
+## 16. ข้อจำกัดของ ChatGPT (ChatGPT Limitations)
 
-### Save `.env` asks for OAuth values during first local test
+โปรดทราบว่า MCP Server ทำหน้าที่เปิดเผยและประมวลผลเครื่องมือ (Expose Tools) ตามสิทธิ์ที่ให้ไว้ แต่ **ChatGPT/OpenAI มีระบบความปลอดภัย (Safety & Confirmation Layer) ของตนเอง**:
 
-If `AUTH_REQUIRED=true`, OAuth values are required.
-
-For localhost-only smoke checks before OAuth is configured, use:
-
-```env
-PUBLIC_BASE_URL=http://127.0.0.1:8789
-CLOUDFLARE_TUNNEL_ENABLED=false
-AUTH_REQUIRED=false
-```
-
-Do not use this configuration with a public URL or tunnel.
+* การกระทำบางอย่าง (เช่น การเขียนลบไฟล์สำคัญ การกดส่งข้อความ การเข้าถึงหน้าเว็บที่มีการ Login ไว้) ChatGPT อาจขึ้นเตือนให้ผู้ใช้กดยืนยัน (Confirm) บน UI ของ ChatGPT เอง
+* การเพิ่มสิทธิ์ใน MCP Server ไม่สามารถข้ามผ่านการบล็อกความปลอดภัยระดับ Platform Layer ของ OpenAI ได้
 
 ---
 
-### `/mcp` returns 401
+## 17. สถาปัตยกรรมสำหรับ AI Commander (AI Commander Architecture Integration)
 
-That is normal without a token.
+*(Planned / Possible Integration)*
 
-A protected MCP endpoint should reject unauthenticated requests.
-
----
-
-### `/authorize` returns `invalid_request`
-
-Usually one of these does not match the ChatGPT connector request:
-
-* `OAUTH_CLIENT_ID`
-* `OAUTH_REDIRECT_URIS`
-* `PUBLIC_BASE_URL`
-* requested `resource`
-* PKCE settings
-
----
-
-### `/callback` works but `/token` returns 401
-
-The ChatGPT connector secret does not match:
-
-```env
-OAUTH_CLIENT_SECRET=
-```
-
-or ChatGPT is not sending the expected client credentials.
-
----
-
-### GitHub login succeeds but ChatGPT does not connect
-
-Keep the two OAuth layers separate:
-
-GitHub callback:
+โปรเจกต์นี้ได้รับการออกแบบโมดูลาร์เพื่อรองรับการขยายไปสู่สถาปัตยกรรม **AI Commander / Multi-Agent Framework**:
 
 ```text
-https://your-public-host.example/callback
+┌────────────────────────────────────────────────────────────────────────┐
+│                        AI Commander Gateway                            │
+│           (Orchestrator / Multi-Agent Decision Engine)                 │
+└────────────────────────────────────────────────────────────────────────┘
+                                   │
+         ┌─────────────────────────┼─────────────────────────┐
+         ▼                         ▼                         ▼
+┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
+│ Local Node MCP  │       │ Remote Worker 1 │       │ Remote Worker 2 │
+│ (This Project)  │       │ (Linux Agent)   │       │ (Cloud Agent)   │
+└─────────────────┘       └─────────────────┘       └─────────────────┘
 ```
 
-ChatGPT connector URL:
-
-```text
-https://your-public-host.example/mcp
-```
-
-ChatGPT redirect URI:
-
-```env
-OAUTH_REDIRECT_URIS=
-```
-
-Do not put the ChatGPT redirect URI into the GitHub OAuth App.
+1. **Stateless Streamable HTTP Compliance:** ทำให้สามารถซ้อน Gateway Proxy ด้านหน้าเพื่อแจกจ่ายงานไปยัง Local Nodes หลายเครื่องได้
+2. **Audit Journaling Standard:** โครงสร้าง `journal.jsonl` สามารถส่งต่อเข้าสู่ระบบ Log Centralized Management เพื่อวิเคราะห์พฤติกรรมของ AI Agent ได้
 
 ---
 
-### Browser automation fails
+## 18. หมายเหตุสำหรับนักพัฒนาและผู้ดูแลระบบ (Developer & Maintainer Notes)
 
-Check whether Playwright browsers are installed:
-
-```powershell
-npx playwright install
-```
-
-Also check whether the server is running under the Windows account that owns the browser/profile you expect to use.
+* **สถานะโปรเจกต์:** โปรเจกต์นี้เป็นซอฟต์แวร์ open-source (MIT License) ในลักษณะ DIY (Do-It-Yourself)
+* **การใช้งานอย่างระมัดระวัง:** ตรวจสอบการตั้งค่าสิทธิ์ Scopes, Workspace Profiles และการเปิด Tunnel เสมอเพื่อความปลอดภัยของข้อมูลในเครื่อง
+* **AI-Assisted Development:** โปรเจกต์นี้พัฒนาและออกแบบโดยมีการสนับสนุนจากเครื่องมือ AI ในกระบวนการเขียนโค้ด ตรวจสอบ และทำเอกสารประกอบ
 
 ---
 
-### Public hostname returns Cloudflare 530
+## สิทธิบัตรและสัญญาอนุญาต (License)
 
-The Cloudflare DNS and tunnel route may be correct, but the local tunnel connector is not connected.
-
-Check that:
-
-* the MCP server is listening on `http://127.0.0.1:8789`
-* `cloudflared` is running
-* the tunnel dashboard shows at least one active replica
-* the tunnel route points to `http://127.0.0.1:8789`
-
----
-
-### ChatGPT can read but cannot perform a browser or desktop action
-
-The local MCP server may be working correctly.
-
-ChatGPT/OpenAI safety layers can still block some write, submit, send, post, authenticated browser, or desktop actions.
-
-Treat this as a platform boundary first, then inspect server logs.
-
----
-
-</details>
-
----
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+MIT License - อ่านรายละเอียดเพิ่มเติมได้ในไฟล์ [LICENSE](LICENSE)
